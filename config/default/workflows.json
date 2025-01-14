@@ -1,0 +1,70 @@
+{
+  "workflows": [
+    {
+      "name": "workflow1",
+      "ingestion_type": "airflow_gcs_to_bigquery",
+      "airflow_gcs_to_bigquery_config": {
+        "bucket": "gs://gdp-cm-test3-load-cs-0",
+        "source_objects": "sample.csv",
+        "source_format": "csv",
+        "autodetect": false,
+        "schema_fields": [
+          {
+            "name": "api-key",
+            "type": "STRING",
+            "mode": "NULLABLE"
+          },
+          {
+            "name": "query1",
+            "type": "STRING",
+            "mode": "NULLABLE"
+          },
+          {
+            "name": "query2",
+            "type": "STRING",
+            "mode": "NULLABLE"
+          },
+          {
+            "name": "body1",
+            "type": "STRING",
+            "mode": "NULLABLE"
+          }
+        ]
+      },
+      "airflow_dag_config": {
+        "schedule_interval": "*/15 * * * *"
+      },
+      "api_config": {
+        "auth": {
+          "type": "HTTP_BASIC",
+          "secret_name": "projects/673200389551/secrets/securesm/versions/latest"
+        },
+        "request_config": {
+          "uri": "https://pokeapi.co/api/v2/pokemon/ditto",
+          "timeout": 10,
+          "max_dispatch": 3,
+          "method": "GET",
+          "static_data": {
+            "headers": {
+              "Content-Type": "application/json"
+            }
+          },
+          "dynamic_data": {
+            "headers": {
+              "KEY": "api-key"
+            },
+            "query_string": {
+              "q1": "query1"
+            },
+            "body": {
+              "key1": "body1"
+            }
+          }
+        },
+        "response_config": {
+          "format": "JSON"
+        }
+      }
+    }
+  ]
+}

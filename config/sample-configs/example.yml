@@ -1,0 +1,63 @@
+
+folder-id: 1234567890 # Folder ID to be used for the networking resources
+region: us-west1 # Region used for regional resources
+location: us # Location used for multi-regional resources
+billing-account: 0000-0000-00000 # Billing Account ID
+suffix: #Suffix used only for project ids.
+org-domain: my-org-domain.com
+resource-prefix: # Prefix used for resource names
+
+# Flag to set 'force_destroy' on data services like BigQuery or Cloud Storage
+force-destroy: true
+
+# Shared VPC network configurations to use. If null networks will be created in projects with preconfigured values.
+network_config:
+  enabled: false
+  host_project:
+  network_self_link:
+  subnet_self_links:
+    load:
+    transformation:
+    orchestration:
+  composer_ip_ranges:
+    cloudsql:
+    gke_master:
+    web_server:
+  composer_secondary_ranges:
+    pods:
+    services:
+
+# Cloud Composer Configuration
+composer:
+  node_count: 3
+  # See list of available versions at https://cloud.google.com/composer/docs/concepts/versioning/composer-versions#images-composer-3
+  airflow_version: composer-3-airflow-2
+  env_variables:
+
+data-catalog:
+  # List of Data Catalog Policy tags to be created with optional IAM binding
+  # configuration in {tag => {ROLE => [MEMBERS]}} format
+  tags:
+    3_Confidential: {}
+    2_Private: {}
+    1_Sensitive: {}
+
+user-groups:
+  data-analysts: gcp-data-analysts
+  data-engineers: gcp-data-engineers
+  data-security: gcp-data-security
+
+# List of core services enabled on all projects
+core-services:
+  - "cloudresourcemanager.googleapis.com"
+  - "iam.googleapis.com"
+  - "serviceusage.googleapis.com"
+  - "stackdriver.googleapis.com"
+
+# Cloud KMS to use to encrypt different services. Key location should match service region
+encryption-keys:
+  bq: 
+  composer: 
+  dataflow: 
+  storage: 
+  pubsub: 
