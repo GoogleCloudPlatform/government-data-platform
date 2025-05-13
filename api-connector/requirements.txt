@@ -1,5 +1,5 @@
 coloredlogs==15.0.1
-Flask==3.1.0
+Flask==3.1.1
 functions-framework==3.8.2
 google-api-core==2.23.0
 google-auth==2.36.0
