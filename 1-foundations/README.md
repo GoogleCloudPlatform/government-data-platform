@@ -75,7 +75,7 @@ See [Workflow Configuration](../docs/gdp-workflow-config.md)
 
 ### 4. Prepare the ingestion file to be precessed
 
-gsutil -m cp endpointslambda gs://${BUCKET}
+gcloud storage cp endpointslambda gs://${BUCKET}
 
 - Edit [sample.csv](./config/api-connector/sample.csv) with the appropriate API call parameters.
 - Edit [config.json](./config/api-connector/config.json) with the appropriate API call workflows.
