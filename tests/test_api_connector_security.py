@@ -243,6 +243,20 @@ class TestQueueNameValidation(unittest.TestCase):
 
 class TestBigQueryRoutineDispatchSecurity(unittest.TestCase):
     def setUp(self):
+        allowed_workflows = json.dumps(
+            {
+                "workflow1": {
+                    "uri": "https://example.com/api",
+                    "method": "GET",
+                    "auth_type": "HTTP_BASIC",
+                    "secret_name": (
+                        "projects/123456789012/secrets/api-secret/versions/latest"
+                    ),
+                    "auth_server": None,
+                    "client_id": None,
+                }
+            }
+        )
         self._patches = [
             patch.object(config, "PROJECT_ID", "gdp-test-lod"),
             patch.object(config, "PROJECT_NUMBER", "123456789012"),
@@ -255,6 +269,7 @@ class TestBigQueryRoutineDispatchSecurity(unittest.TestCase):
                 "api-src-fnc-sa-invoker@gdp-test-lod.iam.gserviceaccount.com",
             ),
             patch.object(config, "ALLOWED_QUEUE_PREFIX", "cloud-task-api-"),
+            patch.object(config, "ALLOWED_WORKFLOWS", allowed_workflows),
         ]
         for p in self._patches:
             p.start()

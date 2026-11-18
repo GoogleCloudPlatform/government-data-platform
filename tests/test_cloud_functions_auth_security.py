@@ -30,6 +30,7 @@ _FORBIDDEN_PROJECT_ROLES_FOR_CF_SAS = (
     "roles/iam.serviceAccountUser",
     "roles/run.invoker",
     "roles/cloudfunctions.invoker",
+    "roles/secretmanager.secretAccessor",
 )
 _CF_SA_REFS = (
     "google_service_account.load-0-api-fnc-runner-sa",

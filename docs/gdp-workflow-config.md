@@ -93,7 +93,7 @@ gcloud secrets add-iam-policy-binding [SECRET_ID] \
     --role="roles/secretmanager.secretAccessor"
 ```
 To retrieve the SERVICE_ACCOUNT_EMAIL, run this command after creating all the resources.
-By default, this permission is already set for all secrets residing in the `load` project.
+Grant this permission per-secret (not project-wide) for every secret referenced in `workflows.json`:
 ```
 terraform output load-0-api-load-runner-sa
 ```

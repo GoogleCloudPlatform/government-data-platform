@@ -14,10 +14,13 @@
 
 from google.cloud import secretmanager
 
+from .workflow_policy import validate_secret_name
+
 
 class Secrets:
     @staticmethod
     def get_value(secret_name: str):
+        validated_name = validate_secret_name(secret_name)
         client = secretmanager.SecretManagerServiceClient()
-        response = client.access_secret_version(name=secret_name)
+        response = client.access_secret_version(name=validated_name)
         return response.payload.data.decode("UTF-8")

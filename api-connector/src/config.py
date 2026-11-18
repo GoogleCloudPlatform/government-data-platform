@@ -32,5 +32,6 @@ class config:
     ALLOWED_QUEUE_PREFIX = (
         __env("ALLOWED_QUEUE_PREFIX", required=False) or "cloud-task-api-"
     )
+    ALLOWED_WORKFLOWS = __env("ALLOWED_WORKFLOWS", required=False)
     ENVIRONMENT = __env("ENVIRONMENT", required=False) or "local"
     PUBSUB_TOPICS = __env("PUBSUB_TOPICS", required=False)

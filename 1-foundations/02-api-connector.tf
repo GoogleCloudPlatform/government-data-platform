@@ -119,10 +119,11 @@ resource "google_service_account" "data-workflow-trigger-api-fnc-runner-sa" {
   display_name = "A service account to run the data-workflow-trigger API function"
 }
 
+# Grant roles/secretmanager.secretAccessor per-secret via
+# google_secret_manager_secret_iam_member rather than project-wide.
 resource "google_project_iam_member" "load-0-api-fnc-runner-sa-iam" {
   for_each = toset([
     "roles/cloudtasks.enqueuer",
-    "roles/secretmanager.secretAccessor",
     "roles/bigquery.dataEditor",
   ])
   project = module.load-project.project_id
@@ -195,6 +196,16 @@ module "load-0-api-fnc" {
     REGION               = local.config.region
     TASK_INVOKER_SA      = google_service_account.load-0-api-fnc-invoker-sa.email
     ALLOWED_QUEUE_PREFIX = "cloud-task-api-"
+    ALLOWED_WORKFLOWS = jsonencode({
+      for wf in local.workflows : wf.name => {
+        uri         = wf.api_config.request_config.uri
+        method      = try(wf.api_config.request_config.method, "POST")
+        auth_type   = try(wf.api_config.auth.type, "NONE")
+        secret_name = try(wf.api_config.auth.secret_name, null)
+        auth_server = try(wf.api_config.auth.auth_server, null)
+        client_id   = try(wf.api_config.auth.client_id, null)
+      }
+    })
     PUBSUB_TOPICS = jsonencode([for ps in module.transf-ps-0 : {
       replace(replace(ps.topic.name, "${local.config.resource-prefix}-", ""), "-trf-ps-0", "") = ps.topic.id
     }])
