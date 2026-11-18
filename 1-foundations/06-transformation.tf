@@ -171,32 +171,28 @@ module "transf-nat" {
   router_network = module.transf-vpc.0.name
 }
 
+resource "google_service_account" "transf-0-api-fnc-runner-sa" {
+  project      = module.transf-project.project_id
+  account_id   = "wfpp-fnc-runner-sa"
+  display_name = "A service account to run the workflow postprocess function"
+}
+
 resource "google_service_account" "transf-0-api-fnc-invoker-sa" {
   project      = module.transf-project.project_id
   account_id   = "wfpp-fnc-sa-invoker"
-  display_name = "A service account to invoke the load API function"
+  display_name = "A service account to invoke the workflow postprocess function"
 }
 
-resource "google_project_iam_member" "transf-0-api-fnc-invoker-sa-iam" {
-  for_each = toset([
-    "roles/iam.serviceAccountUser",
-    "roles/cloudfunctions.invoker",
-    "roles/run.invoker"
-  ])
+resource "google_project_iam_member" "transf-0-api-fnc-invoker-sa-event-receiver" {
   project = module.transf-project.project_id
-  role    = each.key
+  role    = "roles/eventarc.eventReceiver"
   member  = "serviceAccount:${google_service_account.transf-0-api-fnc-invoker-sa.email}"
 }
 
-resource "google_project_iam_member" "load-transf-0-api-fnc-invoker-sa-iam" {
-  for_each = toset([
-    "roles/iam.serviceAccountUser",
-    "roles/cloudfunctions.invoker",
-    "roles/run.invoker"
-  ])
-  project = module.transf-project.project_id
-  role    = each.key
-  member  = "serviceAccount:${google_service_account.load-0-api-fnc-runner-sa.email}"
+resource "google_service_account_iam_member" "transf-0-pubsub-token-creator-on-invoker" {
+  service_account_id = google_service_account.transf-0-api-fnc-invoker-sa.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = module.transf-project.service_agents.pubsub.iam_email
 }
 
 # Workflow postprocessing queue
@@ -207,11 +203,22 @@ module "transf-ps-0" {
   project_id = module.transf-project.project_id
   name       = "${local.config.resource-prefix}-${each.key}-trf-ps-0"
   kms_key    = try(local.service_encryption_keys.pubsub, null)
+  iam = {
+    "roles/pubsub.publisher" = [
+      "serviceAccount:${google_service_account.load-0-api-fnc-runner-sa.email}",
+    ]
+  }
 }
 
 # Workflow postprocessing functions
 module "transf-0-api-fnc" {
-  depends_on = [module.transf-project, google_service_account.transf-0-api-fnc-invoker-sa]
+  depends_on = [
+    module.transf-project,
+    google_service_account.transf-0-api-fnc-runner-sa,
+    google_service_account.transf-0-api-fnc-invoker-sa,
+    google_project_iam_member.transf-0-api-fnc-invoker-sa-event-receiver,
+    google_service_account_iam_member.transf-0-pubsub-token-creator-on-invoker,
+  ]
 
   for_each = toset(local.active-workflows)
 
@@ -219,7 +226,7 @@ module "transf-0-api-fnc" {
   project_id       = module.transf-project.project_id
   name             = "workflow-postprocess-${each.key}"
   region           = local.config.region
-  ingress_settings = "ALLOW_ALL"
+  ingress_settings = "ALLOW_INTERNAL_ONLY"
   bucket_name      = "wfpp-src-${random_id.default.hex}"
   bucket_config = {
     path                      = "workflow-postprocess/"
@@ -231,7 +238,9 @@ module "transf-0-api-fnc" {
   }
 
   iam = {
-    "roles/run.invoker" = ["allUsers"]
+    "roles/run.invoker" = [
+      "serviceAccount:${google_service_account.transf-0-api-fnc-invoker-sa.email}",
+    ]
   }
 
   function_config = {
@@ -255,7 +264,7 @@ module "transf-0-api-fnc" {
     service_account_email = google_service_account.transf-0-api-fnc-invoker-sa.email
   }
 
-  service_account        = google_service_account.transf-0-api-fnc-invoker-sa.email
+  service_account        = google_service_account.transf-0-api-fnc-runner-sa.email
   service_account_create = false
 }
 
