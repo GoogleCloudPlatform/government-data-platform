@@ -29,4 +29,4 @@ def main(request: flask.Request) -> flask.typing.ResponseReturnValue:
         return flask.Response(msg + "\n"), code
     except Exception as e:
         logger.error(f"Exception occurred: {traceback.format_exception(e)}")
-        return flask.Response(f"Exception occurred: {e}"), 500
+        return flask.Response("Internal server error.\n"), 500

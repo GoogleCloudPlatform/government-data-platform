@@ -22,7 +22,14 @@ from google.cloud import tasks_v2
 
 from ..config import config
 from ..logger import logger
+from ..models.enums.auth_type import AuthType
 from ..utils import Utils
+from ..workflow_policy import (
+    WorkflowAuthorizationError,
+    WorkflowPolicy,
+    WorkflowPolicyConfigError,
+    validate_result_table,
+)
 
 _QUEUE_ID_MAX_LEN = 100
 _QUEUE_PREFIX_RE = re.compile(r"^[A-Za-z0-9-]+$")
@@ -174,11 +181,31 @@ class BigQueryRoutineRequest:
                 replies.append({"error": "Invalid queue_name parameter."})
                 continue
 
-            if not isinstance(expected_args["result_table"], str) or not expected_args[
-                "result_table"
-            ]:
-                logger.error("Rejected BigQuery Routine call: missing result_table.")
+            try:
+                validated_result_table = validate_result_table(
+                    expected_args["result_table"]
+                )
+            except ValueError as ve:
+                logger.error(f"Rejected BigQuery Routine call: {ve}")
                 replies.append({"error": "Invalid result_table parameter."})
+                continue
+
+            # Enforce server-side workflow policy before enqueuing authenticated tasks.
+            try:
+                authorized = WorkflowPolicy.authorize(
+                    payload["workflow_id"],
+                    payload["request_config"],
+                    payload["auth"],
+                )
+            except WorkflowPolicyConfigError as ce:
+                logger.error(f"Workflow policy configuration error: {ce}")
+                replies.append(
+                    {"error": "Server configuration error for workflow policy."}
+                )
+                continue
+            except WorkflowAuthorizationError as ae:
+                logger.error(f"Rejected unauthorized BigQuery Routine call: {ae}")
+                replies.append({"error": "Unauthorized workflow request."})
                 continue
 
             # Validate target URI and OIDC service account before enqueuing (fail closed).
@@ -192,6 +219,29 @@ class BigQueryRoutineRequest:
                 )
                 continue
 
+            # Populate enqueued payload with canonical server-side workflow fields.
+            payload["workflow_id"] = authorized.workflow_id
+            payload["result_table"] = validated_result_table
+            canonical_request_config = dict(payload["request_config"])
+            canonical_request_config["uri"] = authorized.uri
+            canonical_request_config["method"] = authorized.method
+            payload["request_config"] = canonical_request_config
+
+            if authorized.auth_type == AuthType.NONE:
+                payload["auth"] = {"type": AuthType.NONE.name}
+            elif authorized.auth_type == AuthType.HTTP_BASIC:
+                payload["auth"] = {
+                    "type": AuthType.HTTP_BASIC.name,
+                    "secret_name": authorized.secret_name,
+                }
+            elif authorized.auth_type == AuthType.CLIENT_CREDENTIALS:
+                payload["auth"] = {
+                    "type": AuthType.CLIENT_CREDENTIALS.name,
+                    "auth_server": authorized.auth_server,
+                    "client_id": authorized.client_id,
+                    "secret_name": authorized.secret_name,
+                }
+
             # Fix query strings
             if isinstance(payload["query_string"], dict):
                 payload["query_string"] = urlencode(payload["query_string"])
@@ -199,7 +249,7 @@ class BigQueryRoutineRequest:
                 payload["query_string"] = ""
 
             # Get log table
-            log_table = expected_args["result_table"].replace(
+            log_table = validated_result_table.replace(
                 "tbl_result", "tbl_process_log"
             )
 

@@ -21,14 +21,38 @@ import requests
 from google.cloud import pubsub_v1
 
 from ..auth import TokenAuth
+from ..config import config
 from ..gsecrets import Secrets
 from ..logger import logger
 from ..models.enums.auth_type import AuthType
 from ..utils import Utils
-from ..config import config
+from ..workflow_policy import (
+    WorkflowAuthorizationError,
+    WorkflowPolicy,
+    WorkflowPolicyConfigError,
+    validate_result_table,
+)
+
+_DEFAULT_TIMEOUT_SECONDS = 10
+_MAX_TIMEOUT_SECONDS = 300
 
 
 class CloudTaskRequest:
+    @staticmethod
+    def _sanitize_headers(headers: Any, has_auth: bool) -> Any:
+        if headers is None:
+            return None
+        if not isinstance(headers, dict):
+            raise ValueError("Invalid headers parameter.")
+        blocked = {"host", "proxy-authorization"}
+        if has_auth:
+            blocked.add("authorization")
+        return {
+            k: v
+            for k, v in headers.items()
+            if isinstance(k, str) and k.lower() not in blocked
+        }
+
     @staticmethod
     def api_call(
         uri: str,
@@ -49,6 +73,8 @@ class CloudTaskRequest:
                 auth_payload = TokenAuth(token=credentials, auth_scheme="access_token")
             case AuthType.HTTP_BASIC:
                 auth_payload = (credentials[0], credentials[1])
+            case AuthType.NONE:
+                auth_payload = None
 
         request_matcher = {
             "get": requests.get,
@@ -60,7 +86,7 @@ class CloudTaskRequest:
         if method.lower() in request_matcher.keys():
             return request_matcher[method.lower()](
                 uri,
-                allow_redirects=True,
+                allow_redirects=False,
                 auth=auth_payload,
                 data=payload,
                 headers=headers,
@@ -77,101 +103,132 @@ class CloudTaskRequest:
         logger.debug("Cloud Task request received.")
 
         workflow_id = Utils.get_property(request, "workflow_id")
+        request_config = Utils.get_property(request, "request_config")
+        auth = Utils.get_property(request, "auth")
+
+        # Enforce server-side workflow policy before touching Secret Manager or HTTP.
+        try:
+            authorized = WorkflowPolicy.authorize(workflow_id, request_config, auth)
+        except WorkflowPolicyConfigError as ce:
+            logger.error(f"Workflow policy configuration error: {ce}")
+            return "Server configuration error for workflow policy.", 503
+        except WorkflowAuthorizationError as ae:
+            logger.error(f"Rejected unauthorized Cloud Task request: {ae}")
+            return "Unauthorized workflow request.", 403
+
+        raw_result_table = Utils.get_property(request, "result_table")
+        try:
+            validated_result_table = validate_result_table(raw_result_table)
+        except ValueError as ve:
+            logger.error(f"Rejected Cloud Task request with invalid result_table: {ve}")
+            return "Invalid result_table parameter.", 400
+
+        raw_headers = Utils.get_property(request, "headers")
+        try:
+            headers = CloudTaskRequest._sanitize_headers(
+                raw_headers,
+                has_auth=authorized.auth_type != AuthType.NONE,
+            )
+        except ValueError as ve:
+            logger.error(f"Rejected Cloud Task request with invalid headers: {ve}")
+            return "Invalid headers parameter.", 400
+
+        raw_timeout = request_config.get("timeout")
+        if (
+            isinstance(raw_timeout, (int, float))
+            and not isinstance(raw_timeout, bool)
+            and 0 < raw_timeout <= _MAX_TIMEOUT_SECONDS
+        ):
+            timeout = raw_timeout
+        else:
+            timeout = _DEFAULT_TIMEOUT_SECONDS
 
         logger.debug("Processing authentication type...")
-        auth = Utils.get_property(request, "auth")
         credentials = None
-        auth_type = ""
-        secret_data = None
-        if auth:
+        if authorized.auth_type in (AuthType.CLIENT_CREDENTIALS, AuthType.HTTP_BASIC):
             try:
-                secret_name = Utils.get_property(auth, "secret_name", required=True)
-                secret_data = json.loads(Secrets.get_value(secret_name))
-                logger.info(f"Obtained secret authentication data for '{secret_name}'")
+                secret_data = json.loads(Secrets.get_value(authorized.secret_name))
+                logger.info(
+                    f"Obtained secret authentication data for '{authorized.secret_name}'"
+                )
             except Exception as e:
-                return f"Could not retrieve secret: {e}", 500
+                logger.error(
+                    f"Could not retrieve secret '{authorized.secret_name}': {e}"
+                )
+                return "Could not retrieve secret.", 500
 
-            try:
-                auth_type = Utils.get_property(auth, "type", required=True)
+            match (authorized.auth_type):
+                case AuthType.CLIENT_CREDENTIALS:
+                    logger.debug("Requesting credentials from server...")
 
-                match (AuthType[auth_type]):
-                    case AuthType.CLIENT_CREDENTIALS:
-                        logger.debug("Requesting credentials from server...")
-
-                        auth_server = Utils.get_property(
-                            auth, "auth_server", required=True
-                        )
-                        client_id = Utils.get_property(auth, "client_id", required=True)
+                    try:
                         client_secret = Utils.get_property(
                             secret_data, "client_secret", required=True
                         )
+                    except KeyError as ke:
+                        logger.error(f"Secret missing required OAuth field: {ke}")
+                        return "Invalid secret format.", 500
 
-                        token_res = requests.post(
-                            url=auth_server,
-                            data={"grant_type": "client_credentials"},
-                            allow_redirects=False,
-                            auth=(client_id, client_secret),
+                    token_res = requests.post(
+                        url=authorized.auth_server,
+                        data={"grant_type": "client_credentials"},
+                        allow_redirects=False,
+                        auth=(authorized.client_id, client_secret),
+                        timeout=timeout,
+                    )
+
+                    if token_res.status_code != 200:
+                        logger.error(
+                            "Failed to obtain token from OAuth 2.0 server: "
+                            f"status={token_res.status_code}"
                         )
+                        return "Failed to obtain token from the OAuth 2.0 server.", 500
 
-                        if token_res.status_code != 200:
-                            msg = f"Failed to obtain token from the OAuth 2.0 server: {token_res.text}"
-                            logger.error(msg)
-                            return msg, 500
+                    access_token = Utils.get_property(
+                        token_res.json(), "access_token", required=True
+                    )
+                    credentials = access_token
 
-                        access_token = Utils.get_property(
-                            token_res.json(), "access_token", required=True
-                        )
-                        credentials = access_token
+                    logger.debug("Success.")
 
-                        logger.debug("Success.")
+                case AuthType.HTTP_BASIC:
+                    logger.debug(
+                        "Accessing secret properties (username, password)..."
+                    )
 
-                    case AuthType.HTTP_BASIC:
-                        logger.debug(
-                            "Accessing secret properties (username, password)..."
-                        )
-
+                    try:
                         credentials = (
                             Utils.get_property(secret_data, "username", required=True),
                             Utils.get_property(secret_data, "password", required=True),
                         )
+                    except KeyError as ke:
+                        logger.error(f"Secret missing required HTTP Basic field: {ke}")
+                        return "Invalid secret format.", 500
 
-                        logger.debug("Success.")
-
-            except KeyError as ke:
-                msg = f"Authentication type of '{auth_type}' is not supported."
-                logger.error(msg)
-                return msg, 422
+                    logger.debug("Success.")
 
             logger.info(
-                f"Credential processing complete. Will use authentication type '{auth_type}'."
+                "Credential processing complete. "
+                f"Will use authentication type '{authorized.auth_type.name}'."
             )
 
-        request_config = Utils.get_property(request, "request_config", required=True)
-
-        uri = Utils.get_property(request_config, "uri", required=True)
-        method = Utils.get_property(request_config, "method") or "POST"
-        timeout = Utils.get_property(request_config, "timeout") or 10
-
         body = Utils.get_property(request, "body")
-        headers = Utils.get_property(request, "headers")
         query_string = Utils.get_property(request, "query_string")
-        result_table = Utils.get_property(request, "result_table").replace(
-            "tbl_process_log", "tbl_result"
-        )
+        result_table = validated_result_table.replace("tbl_process_log", "tbl_result")
         log_table = result_table.replace("tbl_result", "tbl_process_log")
 
         rpl = result_table.replace("tbl_process_log", "*").replace("tbl_result", "*")
         logger.info(f"Results will be sent to '{rpl}'.")
 
         res = CloudTaskRequest.api_call(
-            uri,
-            AuthType[auth_type],
+            authorized.uri,
+            authorized.auth_type,
             credentials,
             query_string,
             body,
             timeout,
             headers,
-            method,
+            authorized.method,
         )
 
         # Persist response on BigQuery
@@ -179,9 +236,9 @@ class CloudTaskRequest:
             result_table,
             {
                 "request": {
-                    "uri": uri,
-                    "method": method,
-                    "auth_type": auth_type,
+                    "uri": authorized.uri,
+                    "method": authorized.method,
+                    "auth_type": authorized.auth_type.name,
                     "query_string": query_string,
                     "body": json.dumps(body),
                 },
@@ -198,13 +255,16 @@ class CloudTaskRequest:
         # Send response to Pub/Sub, if configured
         if config.PUBSUB_TOPICS:
             topics = json.loads(config.PUBSUB_TOPICS)
-            topics = [[v for k, v in t.items() if k == workflow_id] for t in topics]
+            topics = [
+                [v for k, v in t.items() if k == authorized.workflow_id]
+                for t in topics
+            ]
             topic = next((x for xs in topics for x in xs), False)
             if topic:
                 publisher = pubsub_v1.PublisherClient()
 
                 logger.debug(
-                    f"Publishing response data from '{workflow_id}' to '{topic}'..."
+                    f"Publishing response data from '{authorized.workflow_id}' to '{topic}'..."
                 )
                 publisher.publish(str(topic), res.text.encode("utf-8"))
                 logger.debug("Done.")
@@ -225,7 +285,6 @@ class CloudTaskRequest:
             },
         )
 
-        # logger.debug(f"Got response: {res_json}")
         ctype_header = res.headers.get("Content-Type")
         res_out = ""
 

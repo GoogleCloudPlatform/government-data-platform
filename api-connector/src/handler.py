@@ -37,7 +37,9 @@ class Handler:
                     (res, _) = BigQueryRoutineRequest.execute(req_json)
                     return res, 200
                 case Sources.CLOUD_TASK:
-                    (res, _) = CloudTaskRequest.execute(req_json)
+                    (res, status_code) = CloudTaskRequest.execute(req_json)
+                    if status_code in (400, 403, 422, 503):
+                        return res, status_code
                     return res, 202  # This status code avoids retries by Cloud Tasks.
         except KeyError as ke:
             msg = f"Source of type '{source}' is not supported."
