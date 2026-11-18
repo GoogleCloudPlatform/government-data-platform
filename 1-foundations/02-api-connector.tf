@@ -20,20 +20,6 @@ resource "google_bigquery_connection" "load-connection-bq-0" {
   cloud_resource {}
 }
 
-resource "google_project_iam_binding" "load-0-grant-bq-connection-run-invoker" {
-  depends_on = [module.load-project]
-
-  for_each = toset([
-    "roles/cloudfunctions.invoker",
-    "roles/run.invoker",
-  ])
-  project = module.load-project.project_id
-  role    = each.key
-  members = [
-    "serviceAccount:${google_bigquery_connection.load-connection-bq-0.cloud_resource[0].service_account_id}"
-  ]
-}
-
 resource "google_service_account" "load-0-api-sa" {
   depends_on   = [module.load-project]
   project      = module.load-project.project_id
@@ -136,7 +122,6 @@ resource "google_service_account" "data-workflow-trigger-api-fnc-runner-sa" {
 resource "google_project_iam_member" "load-0-api-fnc-runner-sa-iam" {
   for_each = toset([
     "roles/cloudtasks.enqueuer",
-    "roles/iam.serviceAccountUser",
     "roles/secretmanager.secretAccessor",
     "roles/bigquery.dataEditor",
   ])
@@ -145,22 +130,16 @@ resource "google_project_iam_member" "load-0-api-fnc-runner-sa-iam" {
   member  = "serviceAccount:${google_service_account.load-0-api-fnc-runner-sa.email}"
 }
 
-
 resource "google_service_account" "load-0-api-fnc-invoker-sa" {
   project      = module.load-project.project_id
   account_id   = "api-src-fnc-sa-invoker"
   display_name = "A service account to invoke the load API function"
 }
 
-resource "google_project_iam_member" "load-0-api-fnc-invoker-sa-iam" {
-  for_each = toset([
-    "roles/iam.serviceAccountUser",
-    "roles/cloudfunctions.invoker",
-    "roles/run.invoker"
-  ])
-  project = module.load-project.project_id
-  role    = each.key
-  member  = "serviceAccount:${google_service_account.load-0-api-fnc-invoker-sa.email}"
+resource "google_service_account_iam_member" "load-0-api-fnc-runner-act-as-invoker" {
+  service_account_id = google_service_account.load-0-api-fnc-invoker-sa.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.load-0-api-fnc-runner-sa.email}"
 }
 
 resource "google_storage_bucket_object" "load-config-for-templated-dag" {
@@ -172,13 +151,18 @@ resource "google_storage_bucket_object" "load-config-for-templated-dag" {
 }
 
 module "load-0-api-fnc" {
-  depends_on = [module.load-project, google_service_account.load-0-api-fnc-runner-sa]
+  depends_on = [
+    module.load-project,
+    google_service_account.load-0-api-fnc-runner-sa,
+    google_service_account.load-0-api-fnc-invoker-sa,
+    google_bigquery_connection.load-connection-bq-0,
+  ]
 
   source           = "github.com/GoogleCloudPlatform/cloud-foundation-fabric//modules/cloud-function-v2?ref=v36.0.1"
   project_id       = module.load-project.project_id
   name             = "load-0-api-fnc"
   region           = local.config.region
-  ingress_settings = "ALLOW_ALL"
+  ingress_settings = "ALLOW_INTERNAL_ONLY"
   bucket_name      = "api-src-${random_id.default.hex}"
   bucket_config = {
     path                      = "load-process/"
@@ -190,7 +174,10 @@ module "load-0-api-fnc" {
   }
 
   iam = {
-    "roles/run.invoker" = ["allUsers"]
+    "roles/run.invoker" = [
+      "serviceAccount:${google_bigquery_connection.load-connection-bq-0.cloud_resource[0].service_account_id}",
+      "serviceAccount:${google_service_account.load-0-api-fnc-invoker-sa.email}",
+    ]
   }
 
   function_config = {
@@ -202,10 +189,12 @@ module "load-0-api-fnc" {
     timeout        = 480 # Timeout in seconds, increase it if your CF timeouts.
   }
   environment_variables = {
-    PROJECT_NUMBER  = module.load-project.number
-    PROJECT_ID      = module.load-project.project_id
-    FUNCTION_NAME   = "load-0-api-fnc"
-    REGION          = local.config.region
+    PROJECT_NUMBER       = module.load-project.number
+    PROJECT_ID           = module.load-project.project_id
+    FUNCTION_NAME        = "load-0-api-fnc"
+    REGION               = local.config.region
+    TASK_INVOKER_SA      = google_service_account.load-0-api-fnc-invoker-sa.email
+    ALLOWED_QUEUE_PREFIX = "cloud-task-api-"
     PUBSUB_TOPICS = jsonencode([for ps in module.transf-ps-0 : {
       replace(replace(ps.topic.name, "${local.config.resource-prefix}-", ""), "-trf-ps-0", "") = ps.topic.id
     }])

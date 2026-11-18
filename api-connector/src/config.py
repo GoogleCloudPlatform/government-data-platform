@@ -24,7 +24,13 @@ class config:
         return val
 
     PROJECT_ID = __env("PROJECT_ID", required=True)
+    PROJECT_NUMBER = __env("PROJECT_NUMBER", required=False)
     FUNCTION_NAME = __env("FUNCTION_NAME", required=False)
+    FUNCTION_URI = __env("FUNCTION_URI", required=False)
     REGION = __env("REGION", required=False)
+    TASK_INVOKER_SA = __env("TASK_INVOKER_SA", required=False)
+    ALLOWED_QUEUE_PREFIX = (
+        __env("ALLOWED_QUEUE_PREFIX", required=False) or "cloud-task-api-"
+    )
     ENVIRONMENT = __env("ENVIRONMENT", required=False) or "local"
     PUBSUB_TOPICS = __env("PUBSUB_TOPICS", required=False)
