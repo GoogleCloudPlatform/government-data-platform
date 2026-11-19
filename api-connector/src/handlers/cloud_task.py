@@ -30,6 +30,8 @@ from ..workflow_policy import (
     WorkflowAuthorizationError,
     WorkflowPolicy,
     WorkflowPolicyConfigError,
+    sanitize_headers,
+    validate_resolved_https_url,
     validate_result_table,
 )
 
@@ -40,18 +42,17 @@ _MAX_TIMEOUT_SECONDS = 300
 class CloudTaskRequest:
     @staticmethod
     def _sanitize_headers(headers: Any, has_auth: bool) -> Any:
-        if headers is None:
-            return None
-        if not isinstance(headers, dict):
-            raise ValueError("Invalid headers parameter.")
-        blocked = {"host", "proxy-authorization"}
-        if has_auth:
-            blocked.add("authorization")
-        return {
-            k: v
-            for k, v in headers.items()
-            if isinstance(k, str) and k.lower() not in blocked
-        }
+        return sanitize_headers(headers, has_auth=has_auth)
+
+    @staticmethod
+    def _normalize_timeout(raw_timeout: Any) -> float:
+        if (
+            isinstance(raw_timeout, (int, float))
+            and not isinstance(raw_timeout, bool)
+            and 0 < raw_timeout <= _MAX_TIMEOUT_SECONDS
+        ):
+            return raw_timeout
+        return _DEFAULT_TIMEOUT_SECONDS
 
     @staticmethod
     def api_call(
@@ -64,7 +65,13 @@ class CloudTaskRequest:
         headers: Any,
         method: str,
     ):
-        logger.debug(f"{method.upper()} '{uri}'...")
+        validated_uri = validate_resolved_https_url(uri, "request.uri")
+        sanitized_headers = CloudTaskRequest._sanitize_headers(
+            headers, has_auth=auth_type != AuthType.NONE
+        )
+        safe_timeout = CloudTaskRequest._normalize_timeout(timeout)
+
+        logger.debug(f"{method.upper()} '{validated_uri}'...")
 
         auth_payload = None
 
@@ -85,13 +92,13 @@ class CloudTaskRequest:
 
         if method.lower() in request_matcher.keys():
             return request_matcher[method.lower()](
-                uri,
+                validated_uri,
                 allow_redirects=False,
                 auth=auth_payload,
                 data=payload,
-                headers=headers,
+                headers=sanitized_headers,
                 params=query_string,
-                timeout=timeout,
+                timeout=safe_timeout,
             )
         else:
             msg = f"HTTP Method '{method}' is not supported."
@@ -133,15 +140,19 @@ class CloudTaskRequest:
             logger.error(f"Rejected Cloud Task request with invalid headers: {ve}")
             return "Invalid headers parameter.", 400
 
-        raw_timeout = request_config.get("timeout")
-        if (
-            isinstance(raw_timeout, (int, float))
-            and not isinstance(raw_timeout, bool)
-            and 0 < raw_timeout <= _MAX_TIMEOUT_SECONDS
-        ):
-            timeout = raw_timeout
-        else:
-            timeout = _DEFAULT_TIMEOUT_SECONDS
+        # Resolve and validate destination host(s) before accessing Secret Manager or HTTP.
+        try:
+            validated_uri = validate_resolved_https_url(authorized.uri, "request.uri")
+            validated_auth_server = (
+                validate_resolved_https_url(authorized.auth_server, "auth.auth_server")
+                if authorized.auth_type == AuthType.CLIENT_CREDENTIALS
+                else None
+            )
+        except ValueError as ve:
+            logger.error(f"Rejected Cloud Task request with disallowed destination: {ve}")
+            return "Unauthorized workflow request.", 403
+
+        timeout = CloudTaskRequest._normalize_timeout(request_config.get("timeout"))
 
         logger.debug("Processing authentication type...")
         credentials = None
@@ -170,7 +181,7 @@ class CloudTaskRequest:
                         return "Invalid secret format.", 500
 
                     token_res = requests.post(
-                        url=authorized.auth_server,
+                        url=validated_auth_server,
                         data={"grant_type": "client_credentials"},
                         allow_redirects=False,
                         auth=(authorized.client_id, client_secret),
@@ -221,7 +232,7 @@ class CloudTaskRequest:
         logger.info(f"Results will be sent to '{rpl}'.")
 
         res = CloudTaskRequest.api_call(
-            authorized.uri,
+            validated_uri,
             authorized.auth_type,
             credentials,
             query_string,
@@ -236,7 +247,7 @@ class CloudTaskRequest:
             result_table,
             {
                 "request": {
-                    "uri": authorized.uri,
+                    "uri": validated_uri,
                     "method": authorized.method,
                     "auth_type": authorized.auth_type.name,
                     "query_string": query_string,
@@ -285,13 +296,8 @@ class CloudTaskRequest:
             },
         )
 
-        ctype_header = res.headers.get("Content-Type")
-        res_out = ""
-
-        if ctype_header and ctype_header.startswith("application/json"):
-            res_out = json.dumps(res.json())
-        else:
-            res_out = res.text
-
-        logger.debug(res_out)
-        return res_out, 202
+        # Do not echo upstream response bodies back to HTTP callers (prevents
+        # full-read SSRF response reflection and sensitive body leakage).
+        ack = json.dumps({"status": "processed", "status_code": res.status_code})
+        logger.debug(f"Completed upstream request with status_code={res.status_code}.")
+        return ack, 202

@@ -15,8 +15,9 @@
 import ipaddress
 import json
 import re
+import socket
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Union
 from urllib.parse import urlparse
 
 from .config import config
@@ -26,6 +27,7 @@ _SECRET_VERSION_RE = re.compile(
     r"^projects/[A-Za-z0-9-]+/secrets/[A-Za-z0-9_-]+/versions/(?:latest|[1-9][0-9]*)$"
 )
 _RESULT_TABLE_RE = re.compile(r"^[A-Za-z0-9_]+\.[A-Za-z0-9_-]+$")
+_HEADER_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
 _SUPPORTED_METHODS = frozenset({"GET", "POST", "PUT", "DELETE"})
 _DISALLOWED_HOSTS = frozenset(
     {
@@ -35,6 +37,50 @@ _DISALLOWED_HOSTS = frozenset(
         "metadata.google.internal",
     }
 )
+_DISALLOWED_HOST_SUFFIXES = (
+    ".localhost",
+    ".local",
+    ".localdomain",
+    ".internal",
+    ".google.internal",
+    ".metadata.goog",
+    ".metadata.google.internal",
+)
+_BLOCKED_HEADERS = frozenset(
+    {
+        "host",
+        "proxy-authorization",
+        "proxy-authenticate",
+        "proxy-connection",
+        "connection",
+        "keep-alive",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+        "content-length",
+        "forwarded",
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+        "metadata-flavor",
+        "x-google-metadata-request",
+        "metadata",
+        "x-aws-ec2-metadata-token",
+        "x-aws-ec2-metadata-token-ttl-seconds",
+    }
+)
+_BLOCKED_HEADER_PREFIXES = (
+    "metadata-",
+    "x-google-metadata-",
+    "x-aws-ec2-metadata-",
+)
+_CLOUD_METADATA_IPV4 = ipaddress.IPv4Network("169.254.0.0/16")
+_CGNAT_IPV4 = ipaddress.IPv4Network("100.64.0.0/10")
+_NAT64_WELL_KNOWN = ipaddress.IPv6Network("64:ff9b::/96")
+_NAT64_LOCAL_USE = ipaddress.IPv6Network("64:ff9b:1::/48")
+_IPV4_COMPAT_NET = ipaddress.IPv6Network("::/96")
+_AWS_IMDS_IPV6 = ipaddress.IPv6Network("fd00:ec2::/32")
 
 
 class WorkflowPolicyConfigError(ValueError):
@@ -72,14 +118,53 @@ def validate_result_table(result_table: Any) -> str:
     return result_table
 
 
-def _is_disallowed_ip(hostname: str) -> bool:
-    try:
-        ip = ipaddress.ip_address(hostname)
-    except ValueError:
-        return False
+def sanitize_headers(headers: Any, has_auth: bool = False) -> Optional[dict]:
+    if headers is None:
+        return None
+    if not isinstance(headers, dict):
+        raise ValueError("Invalid headers parameter.")
 
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
+    blocked = set(_BLOCKED_HEADERS)
+    if has_auth:
+        blocked.add("authorization")
+
+    sanitized: dict[str, str] = {}
+    for key, value in headers.items():
+        if not isinstance(key, str) or not _HEADER_NAME_RE.fullmatch(key):
+            raise ValueError("Invalid headers parameter.")
+        if not isinstance(value, str) or any(
+            (ord(ch) < 32 and ch != "\t") or ord(ch) == 127 for ch in value
+        ):
+            raise ValueError("Invalid headers parameter.")
+        lower_key = key.lower()
+        if lower_key in blocked or lower_key.startswith(_BLOCKED_HEADER_PREFIXES):
+            continue
+        sanitized[key] = value
+    return sanitized
+
+
+def _is_disallowed_ip_address(
+    ip: Union[ipaddress.IPv4Address, ipaddress.IPv6Address],
+) -> bool:
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            return _is_disallowed_ip_address(ip.ipv4_mapped)
+        if ip.sixtofour is not None and _is_disallowed_ip_address(ip.sixtofour):
+            return True
+        if ip.teredo is not None:
+            server, client = ip.teredo
+            if _is_disallowed_ip_address(server) or _is_disallowed_ip_address(client):
+                return True
+        if (
+            ip in _NAT64_WELL_KNOWN
+            or ip in _NAT64_LOCAL_USE
+            or ip in _IPV4_COMPAT_NET
+            or ip in _AWS_IMDS_IPV6
+        ):
+            return True
+    else:
+        if ip in _CLOUD_METADATA_IPV4 or ip in _CGNAT_IPV4:
+            return True
 
     return (
         not ip.is_global
@@ -92,11 +177,89 @@ def _is_disallowed_ip(hostname: str) -> bool:
     )
 
 
+def _is_obfuscated_ipv4_literal(hostname: str) -> bool:
+    try:
+        socket.inet_aton(hostname)
+        return True
+    except OSError:
+        pass
+
+    parts = hostname.split(".")
+    if 1 <= len(parts) <= 4 and all(
+        part
+        and (
+            part.isdigit()
+            or (
+                len(part) > 2
+                and part[:2].lower() == "0x"
+                and all(c in "0123456789abcdefABCDEF" for c in part[2:])
+            )
+        )
+        for part in parts
+    ):
+        return True
+    return False
+
+
+def _normalize_and_validate_host(hostname: str, field_name: str) -> tuple[str, bool]:
+    if not hostname or "%" in hostname:
+        raise ValueError(f"Invalid {field_name}: host is not allowed.")
+
+    if ":" in hostname:
+        try:
+            ip = ipaddress.IPv6Address(hostname)
+        except ValueError as err:
+            raise ValueError(f"Invalid {field_name}: host is not allowed.") from err
+        if _is_disallowed_ip_address(ip):
+            raise ValueError(f"Invalid {field_name}: host is not allowed.")
+        return str(ip), True
+
+    try:
+        ascii_host = hostname.encode("idna").decode("ascii").rstrip(".").lower()
+    except UnicodeError as err:
+        raise ValueError(f"Invalid {field_name}: host is not allowed.") from err
+
+    if not ascii_host or ascii_host.startswith(".") or ".." in ascii_host:
+        raise ValueError(f"Invalid {field_name}: host is not allowed.")
+
+    try:
+        ip = ipaddress.ip_address(ascii_host)
+    except ValueError:
+        ip = None
+
+    if ip is not None:
+        if _is_disallowed_ip_address(ip):
+            raise ValueError(f"Invalid {field_name}: host is not allowed.")
+        return str(ip), True
+
+    if _is_obfuscated_ipv4_literal(ascii_host):
+        raise ValueError(f"Invalid {field_name}: host is not allowed.")
+
+    if (
+        ascii_host in _DISALLOWED_HOSTS
+        or ascii_host.endswith(_DISALLOWED_HOST_SUFFIXES)
+        or "." not in ascii_host
+    ):
+        raise ValueError(f"Invalid {field_name}: host is not allowed.")
+
+    return ascii_host, False
+
+
 def validate_https_url(url: Any, field_name: str = "url") -> str:
-    if not isinstance(url, str) or not url or any(ch.isspace() for ch in url):
+    if (
+        not isinstance(url, str)
+        or not url
+        or "\\" in url
+        or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in url)
+    ):
         raise ValueError(f"Invalid {field_name}: must be a valid HTTPS URL.")
 
     parsed = urlparse(url)
+    try:
+        _ = parsed.port
+    except ValueError as err:
+        raise ValueError(f"Invalid {field_name}: must be a valid HTTPS URL.") from err
+
     if (
         parsed.scheme != "https"
         or not parsed.netloc
@@ -107,15 +270,44 @@ def validate_https_url(url: Any, field_name: str = "url") -> str:
     ):
         raise ValueError(f"Invalid {field_name}: must be a valid HTTPS URL.")
 
-    hostname = parsed.hostname.rstrip(".").lower()
-    if (
-        hostname in _DISALLOWED_HOSTS
-        or hostname.endswith(".localhost")
-        or _is_disallowed_ip(hostname)
-    ):
-        raise ValueError(f"Invalid {field_name}: host is not allowed.")
-
+    _normalize_and_validate_host(parsed.hostname, field_name)
     return url
+
+
+def validate_resolved_https_url(url: Any, field_name: str = "url") -> str:
+    validated = validate_https_url(url, field_name)
+    parsed = urlparse(validated)
+    normalized_host, is_ip_literal = _normalize_and_validate_host(
+        parsed.hostname or "", field_name
+    )
+    if is_ip_literal:
+        return validated
+
+    port = parsed.port or 443
+    try:
+        addr_info = socket.getaddrinfo(normalized_host, port, type=socket.SOCK_STREAM)
+    except OSError as err:
+        raise ValueError(
+            f"Invalid {field_name}: host could not be resolved."
+        ) from err
+
+    if not addr_info:
+        raise ValueError(f"Invalid {field_name}: host could not be resolved.")
+
+    for entry in addr_info:
+        sockaddr = entry[4]
+        raw_ip = sockaddr[0].split("%", 1)[0]
+        try:
+            resolved_ip = ipaddress.ip_address(raw_ip)
+        except ValueError as err:
+            raise ValueError(
+                f"Invalid {field_name}: resolved IP is not allowed."
+            ) from err
+        if _is_disallowed_ip_address(resolved_ip):
+            raise ValueError(f"Invalid {field_name}: resolved IP is not allowed.")
+
+    return validated
+
 
 
 class WorkflowPolicy:
