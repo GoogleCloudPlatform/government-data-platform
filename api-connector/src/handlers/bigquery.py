@@ -28,6 +28,7 @@ from ..workflow_policy import (
     WorkflowAuthorizationError,
     WorkflowPolicy,
     WorkflowPolicyConfigError,
+    sanitize_headers,
     validate_result_table,
 )
 
@@ -219,9 +220,22 @@ class BigQueryRoutineRequest:
                 )
                 continue
 
+            try:
+                sanitized_headers = sanitize_headers(
+                    payload["headers"],
+                    has_auth=authorized.auth_type != AuthType.NONE,
+                )
+            except ValueError as ve:
+                logger.error(
+                    f"Rejected BigQuery Routine call with invalid headers: {ve}"
+                )
+                replies.append({"error": "Invalid headers parameter."})
+                continue
+
             # Populate enqueued payload with canonical server-side workflow fields.
             payload["workflow_id"] = authorized.workflow_id
             payload["result_table"] = validated_result_table
+            payload["headers"] = sanitized_headers
             canonical_request_config = dict(payload["request_config"])
             canonical_request_config["uri"] = authorized.uri
             canonical_request_config["method"] = authorized.method
@@ -251,6 +265,9 @@ class BigQueryRoutineRequest:
             # Get log table
             log_table = validated_result_table.replace(
                 "tbl_result", "tbl_process_log"
+            )
+            logged_headers = (
+                json.dumps(sanitized_headers) if sanitized_headers is not None else None
             )
 
             try:
@@ -284,7 +301,7 @@ class BigQueryRoutineRequest:
                     log_table,
                     {
                         "query_string": expected_args["query_string"],
-                        "headers": expected_args["headers"],
+                        "headers": logged_headers,
                         "body": expected_args["body"],
                         "result": json.dumps(log_info),
                         "exec_time": f"{datetime.now().isoformat()}",
@@ -300,7 +317,7 @@ class BigQueryRoutineRequest:
                     log_table,
                     {
                         "query_string": expected_args["query_string"],
-                        "headers": expected_args["headers"],
+                        "headers": logged_headers,
                         "body": expected_args["body"],
                         "result": json.dumps(log_info),
                         "exec_time": f"{datetime.now().isoformat()}",

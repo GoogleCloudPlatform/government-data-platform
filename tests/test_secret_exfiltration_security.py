@@ -20,6 +20,7 @@ and Terraform Secret Manager IAM hardening in 1-foundations/02-api-connector.tf.
 import json
 import os
 import re
+import socket
 import sys
 import types
 import unittest
@@ -225,6 +226,12 @@ class TestCloudTaskSecretExfiltrationCWE200(unittest.TestCase):
             patch.object(config, "ALLOWED_QUEUE_PREFIX", "cloud-task-api-"),
             patch.object(config, "ALLOWED_WORKFLOWS", ALLOWED_WORKFLOWS_FIXTURE),
             patch.object(config, "PUBSUB_TOPICS", None),
+            patch(
+                "src.workflow_policy.socket.getaddrinfo",
+                return_value=[
+                    (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+                ],
+            ),
         ]
         for p in self._patches:
             p.start()
@@ -579,7 +586,7 @@ class TestCloudTaskSecretExfiltrationCWE200(unittest.TestCase):
 
         body, status = Handler.execute(req)
         self.assertEqual(status, 202)
-        self.assertEqual(json.loads(body), {"name": "ditto"})
+        self.assertEqual(json.loads(body), {"status": "processed", "status_code": 200})
 
         mock_get_secret.assert_called_once_with(
             "projects/123456789012/secrets/workflow1-basic/versions/latest"
@@ -594,6 +601,10 @@ class TestCloudTaskSecretExfiltrationCWE200(unittest.TestCase):
         )
         self.assertEqual(kwargs["timeout"], 15)
         self.assertEqual(mock_save_bq.call_count, 2)
+        self.assertEqual(
+            mock_save_bq.call_args_list[0].args[1]["response"]["body"],
+            '{"name": "ditto"}',
+        )
 
     @patch("src.handlers.cloud_task.Utils.save_bigquery", return_value=True)
     @patch("src.handlers.cloud_task.requests.post")
@@ -626,8 +637,11 @@ class TestCloudTaskSecretExfiltrationCWE200(unittest.TestCase):
 
         body, status = Handler.execute(req)
         self.assertEqual(status, 202)
-        self.assertEqual(json.loads(body), {"items": []})
+        self.assertEqual(json.loads(body), {"status": "processed", "status_code": 200})
         self.assertEqual(mock_requests_post.call_count, 2)
+        self.assertEqual(
+            mock_save_bq.call_args_list[0].args[1]["response"]["body"], '{"items": []}'
+        )
 
         token_call = mock_requests_post.call_args_list[0]
         self.assertEqual(
