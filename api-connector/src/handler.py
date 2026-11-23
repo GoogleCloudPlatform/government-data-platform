@@ -27,22 +27,23 @@ class Handler:
     @staticmethod
     def execute(request: flask.Request) -> Tuple[Any, int]:
         req_json = request.get_json(silent=True)
-        if not req_json:
-            raise Exception("Invalid request")
+        if not isinstance(req_json, dict) or not req_json:
+            return "Invalid request.", 400
 
-        source = Utils.get_property(req_json, "source") or Sources.BIGQUERY_ROUTINE.name
-        try:
-            match (Sources[source]):
-                case Sources.BIGQUERY_ROUTINE:
-                    (res, _) = BigQueryRoutineRequest.execute(req_json)
-                    return res, 200
-                case Sources.CLOUD_TASK:
-                    (res, status_code) = CloudTaskRequest.execute(req_json)
-                    if status_code in (400, 403, 422, 503):
-                        return res, status_code
-                    return res, 202  # This status code avoids retries by Cloud Tasks.
-        except KeyError as ke:
-            msg = f"Source of type '{source}' is not supported."
-            logger.error(msg)
+        raw_source = Utils.get_property(req_json, "source")
+        source = (
+            Sources.BIGQUERY_ROUTINE.name if raw_source in (None, "") else raw_source
+        )
+        if not isinstance(source, str) or source not in Sources.__members__:
+            logger.error("Rejected request with unsupported source type.")
+            return "Unsupported request source.", 422
 
-            return msg, 422
+        match Sources[source]:
+            case Sources.BIGQUERY_ROUTINE:
+                (res, _) = BigQueryRoutineRequest.execute(req_json)
+                return res, 200
+            case Sources.CLOUD_TASK:
+                (res, status_code) = CloudTaskRequest.execute(req_json)
+                if status_code in (400, 403, 422, 503):
+                    return res, status_code
+                return res, 202  # This status code avoids retries by Cloud Tasks.
