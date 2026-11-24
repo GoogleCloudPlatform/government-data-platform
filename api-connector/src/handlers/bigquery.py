@@ -28,8 +28,8 @@ from ..workflow_policy import (
     WorkflowAuthorizationError,
     WorkflowPolicy,
     WorkflowPolicyConfigError,
+    resolve_result_and_log_tables,
     sanitize_headers,
-    validate_result_table,
 )
 
 _QUEUE_ID_MAX_LEN = 100
@@ -183,9 +183,15 @@ class BigQueryRoutineRequest:
                 continue
 
             try:
-                validated_result_table = validate_result_table(
+                canonical_result_table, log_table = resolve_result_and_log_tables(
                     expected_args["result_table"]
                 )
+            except WorkflowPolicyConfigError as ce:
+                logger.error(f"BigQuery destination configuration error: {ce}")
+                replies.append(
+                    {"error": "Server configuration error for BigQuery destination."}
+                )
+                continue
             except ValueError as ve:
                 logger.error(f"Rejected BigQuery Routine call: {ve}")
                 replies.append({"error": "Invalid result_table parameter."})
@@ -234,7 +240,7 @@ class BigQueryRoutineRequest:
 
             # Populate enqueued payload with canonical server-side workflow fields.
             payload["workflow_id"] = authorized.workflow_id
-            payload["result_table"] = validated_result_table
+            payload["result_table"] = canonical_result_table
             payload["headers"] = sanitized_headers
             canonical_request_config = dict(payload["request_config"])
             canonical_request_config["uri"] = authorized.uri
@@ -262,10 +268,6 @@ class BigQueryRoutineRequest:
             elif payload["query_string"] is None:
                 payload["query_string"] = ""
 
-            # Get log table
-            log_table = validated_result_table.replace(
-                "tbl_result", "tbl_process_log"
-            )
             logged_headers = (
                 json.dumps(sanitized_headers) if sanitized_headers is not None else None
             )

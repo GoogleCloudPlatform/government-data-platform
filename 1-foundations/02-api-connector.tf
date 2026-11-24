@@ -120,15 +120,22 @@ resource "google_service_account" "data-workflow-trigger-api-fnc-runner-sa" {
 }
 
 # Grant roles/secretmanager.secretAccessor per-secret via
-# google_secret_manager_secret_iam_member rather than project-wide.
+# google_secret_manager_secret_iam_member rather than project-wide, and grant
+# roles/bigquery.dataEditor scoped to dwh-load-bq-0 below.
 resource "google_project_iam_member" "load-0-api-fnc-runner-sa-iam" {
   for_each = toset([
     "roles/cloudtasks.enqueuer",
-    "roles/bigquery.dataEditor",
   ])
   project = module.load-project.project_id
   role    = each.key
   member  = "serviceAccount:${google_service_account.load-0-api-fnc-runner-sa.email}"
+}
+
+resource "google_bigquery_dataset_iam_member" "load-0-api-fnc-runner-bq-dataset-editor" {
+  project    = module.load-project.project_id
+  dataset_id = module.dwh-load-bq-0.dataset_id
+  role       = "roles/bigquery.dataEditor"
+  member     = "serviceAccount:${google_service_account.load-0-api-fnc-runner-sa.email}"
 }
 
 resource "google_service_account" "load-0-api-fnc-invoker-sa" {
@@ -154,6 +161,7 @@ resource "google_storage_bucket_object" "load-config-for-templated-dag" {
 module "load-0-api-fnc" {
   depends_on = [
     module.load-project,
+    module.dwh-load-bq-0,
     google_service_account.load-0-api-fnc-runner-sa,
     google_service_account.load-0-api-fnc-invoker-sa,
     google_bigquery_connection.load-connection-bq-0,
@@ -196,6 +204,7 @@ module "load-0-api-fnc" {
     REGION               = local.config.region
     TASK_INVOKER_SA      = google_service_account.load-0-api-fnc-invoker-sa.email
     ALLOWED_QUEUE_PREFIX = "cloud-task-api-"
+    ALLOWED_BQ_DATASET   = module.dwh-load-bq-0.dataset_id
     ALLOWED_WORKFLOWS = jsonencode({
       for wf in local.workflows : wf.name => {
         uri         = wf.api_config.request_config.uri

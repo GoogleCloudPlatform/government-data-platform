@@ -26,7 +26,10 @@ from .models.enums.auth_type import AuthType
 _SECRET_VERSION_RE = re.compile(
     r"^projects/[A-Za-z0-9-]+/secrets/[A-Za-z0-9_-]+/versions/(?:latest|[1-9][0-9]*)$"
 )
-_RESULT_TABLE_RE = re.compile(r"^[A-Za-z0-9_]+\.[A-Za-z0-9_-]+$")
+_BQ_DATASET_RE = re.compile(r"^[A-Za-z0-9_]{1,1024}$")
+_BQ_RUN_TABLE_RE = re.compile(
+    r"^(tbl_result_|tbl_process_log_)([A-Za-z0-9][A-Za-z0-9_-]{0,99})$"
+)
 _HEADER_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
 _SUPPORTED_METHODS = frozenset({"GET", "POST", "PUT", "DELETE"})
 _DISALLOWED_HOSTS = frozenset(
@@ -84,7 +87,7 @@ _AWS_IMDS_IPV6 = ipaddress.IPv6Network("fd00:ec2::/32")
 
 
 class WorkflowPolicyConfigError(ValueError):
-    """Raised when server-side ALLOWED_WORKFLOWS policy is missing or invalid."""
+    """Raised when server-side workflow or destination policy is missing or invalid."""
 
 
 class WorkflowAuthorizationError(ValueError):
@@ -110,12 +113,48 @@ def validate_secret_name(secret_name: Any) -> str:
     return secret_name
 
 
-def validate_result_table(result_table: Any) -> str:
-    if not isinstance(result_table, str) or not _RESULT_TABLE_RE.fullmatch(
-        result_table
+def validate_allowed_bq_dataset() -> str:
+    allowed_dataset = config.ALLOWED_BQ_DATASET
+    if (
+        not isinstance(allowed_dataset, str)
+        or not allowed_dataset
+        or not _BQ_DATASET_RE.fullmatch(allowed_dataset)
     ):
+        raise WorkflowPolicyConfigError("ALLOWED_BQ_DATASET must be configured.")
+    return allowed_dataset
+
+
+def _parse_validated_result_table(result_table: Any) -> tuple[str, str, str]:
+    allowed_dataset = validate_allowed_bq_dataset()
+    if not isinstance(result_table, str):
         raise ValueError("Invalid result_table parameter.")
-    return result_table
+
+    parts = result_table.split(".")
+    if len(parts) != 2:
+        raise ValueError("Invalid result_table parameter.")
+
+    dataset_id, table_id = parts
+    if dataset_id != allowed_dataset:
+        raise ValueError("Invalid result_table parameter.")
+
+    match = _BQ_RUN_TABLE_RE.fullmatch(table_id)
+    if not match:
+        raise ValueError("Invalid result_table parameter.")
+
+    return allowed_dataset, match.group(1), match.group(2)
+
+
+def validate_result_table(result_table: Any) -> str:
+    dataset_id, prefix, run_id = _parse_validated_result_table(result_table)
+    return f"{dataset_id}.{prefix}{run_id}"
+
+
+def resolve_result_and_log_tables(result_table: Any) -> tuple[str, str]:
+    dataset_id, _, run_id = _parse_validated_result_table(result_table)
+    return (
+        f"{dataset_id}.tbl_result_{run_id}",
+        f"{dataset_id}.tbl_process_log_{run_id}",
+    )
 
 
 def sanitize_headers(headers: Any, has_auth: bool = False) -> Optional[dict]:
