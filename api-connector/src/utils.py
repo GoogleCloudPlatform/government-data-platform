@@ -18,6 +18,7 @@ from google.cloud import bigquery
 
 from .config import config
 from .logger import logger
+from .workflow_policy import validate_result_table
 
 
 class Utils:
@@ -29,11 +30,20 @@ class Utils:
         return val
 
     @staticmethod
-    def save_bigquery(dataset_and_table, data, project_id=config.PROJECT_ID):
-        logger.debug(f"Attempting to write to table '{dataset_and_table}'")
+    def save_bigquery(dataset_and_table, data, project_id=None):
+        expected_project = config.PROJECT_ID
+        if not isinstance(expected_project, str) or not expected_project:
+            raise ValueError("PROJECT_ID must be configured.")
 
-        client = bigquery.Client()
-        table = client.get_table(f"{project_id}.{dataset_and_table}")
+        if project_id is not None and project_id != expected_project:
+            raise ValueError("Cross-project BigQuery writes are not allowed.")
+
+        validated_table = validate_result_table(dataset_and_table)
+
+        logger.debug(f"Attempting to write to table '{validated_table}'")
+
+        client = bigquery.Client(project=expected_project)
+        table = client.get_table(f"{expected_project}.{validated_table}")
         rows = [data]
 
         errors = client.insert_rows_json(table, rows)

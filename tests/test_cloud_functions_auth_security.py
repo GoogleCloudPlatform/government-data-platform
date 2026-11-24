@@ -31,6 +31,9 @@ _FORBIDDEN_PROJECT_ROLES_FOR_CF_SAS = (
     "roles/run.invoker",
     "roles/cloudfunctions.invoker",
     "roles/secretmanager.secretAccessor",
+    "roles/bigquery.dataEditor",
+    "roles/bigquery.dataOwner",
+    "roles/bigquery.admin",
 )
 _CF_SA_REFS = (
     "google_service_account.load-0-api-fnc-runner-sa",

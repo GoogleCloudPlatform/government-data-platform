@@ -30,9 +30,9 @@ from ..workflow_policy import (
     WorkflowAuthorizationError,
     WorkflowPolicy,
     WorkflowPolicyConfigError,
+    resolve_result_and_log_tables,
     sanitize_headers,
     validate_resolved_https_url,
-    validate_result_table,
 )
 
 _DEFAULT_TIMEOUT_SECONDS = 10
@@ -125,7 +125,10 @@ class CloudTaskRequest:
 
         raw_result_table = Utils.get_property(request, "result_table")
         try:
-            validated_result_table = validate_result_table(raw_result_table)
+            result_table, log_table = resolve_result_and_log_tables(raw_result_table)
+        except WorkflowPolicyConfigError as ce:
+            logger.error(f"BigQuery destination configuration error: {ce}")
+            return "Server configuration error for BigQuery destination.", 503
         except ValueError as ve:
             logger.error(f"Rejected Cloud Task request with invalid result_table: {ve}")
             return "Invalid result_table parameter.", 400
@@ -225,10 +228,9 @@ class CloudTaskRequest:
 
         body = Utils.get_property(request, "body")
         query_string = Utils.get_property(request, "query_string")
-        result_table = validated_result_table.replace("tbl_process_log", "tbl_result")
-        log_table = result_table.replace("tbl_result", "tbl_process_log")
 
-        rpl = result_table.replace("tbl_process_log", "*").replace("tbl_result", "*")
+        dataset_id, result_table_name = result_table.split(".", 1)
+        rpl = f"{dataset_id}.*{result_table_name.removeprefix('tbl_result')}"
         logger.info(f"Results will be sent to '{rpl}'.")
 
         res = CloudTaskRequest.api_call(

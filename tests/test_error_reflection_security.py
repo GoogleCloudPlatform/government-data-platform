@@ -44,6 +44,7 @@ os.environ.setdefault(
     "api-src-fnc-sa-invoker@gdp-test-lod.iam.gserviceaccount.com",
 )
 os.environ.setdefault("ALLOWED_QUEUE_PREFIX", "cloud-task-api-")
+os.environ.setdefault("ALLOWED_BQ_DATASET", "gdp_test_dwh_load_bq_0")
 
 
 def _install_optional_stubs() -> None:
@@ -335,6 +336,7 @@ class TestInnerHandlerEnumerationOracleGuards(unittest.TestCase):
                 "api-src-fnc-sa-invoker@gdp-test-lod.iam.gserviceaccount.com",
             ),
             patch.object(API_CONFIG, "ALLOWED_QUEUE_PREFIX", "cloud-task-api-"),
+            patch.object(API_CONFIG, "ALLOWED_BQ_DATASET", "gdp_test_dwh_load_bq_0"),
             patch.object(API_CONFIG, "ALLOWED_WORKFLOWS", ALLOWED_WORKFLOWS_FIXTURE),
             patch.object(API_CONFIG, "PUBSUB_TOPICS", None),
             patch.object(

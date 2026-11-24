@@ -41,6 +41,7 @@ os.environ.setdefault(
     "api-src-fnc-sa-invoker@gdp-test-lod.iam.gserviceaccount.com",
 )
 os.environ.setdefault("ALLOWED_QUEUE_PREFIX", "cloud-task-api-")
+os.environ.setdefault("ALLOWED_BQ_DATASET", "gdp_test_dwh_load_bq_0")
 
 
 def _install_optional_stubs() -> None:
@@ -269,6 +270,7 @@ class TestBigQueryRoutineDispatchSecurity(unittest.TestCase):
                 "api-src-fnc-sa-invoker@gdp-test-lod.iam.gserviceaccount.com",
             ),
             patch.object(config, "ALLOWED_QUEUE_PREFIX", "cloud-task-api-"),
+            patch.object(config, "ALLOWED_BQ_DATASET", "gdp_test_dwh_load_bq_0"),
             patch.object(config, "ALLOWED_WORKFLOWS", allowed_workflows),
         ]
         for p in self._patches:
